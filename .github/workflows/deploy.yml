@@ -48,8 +48,13 @@ jobs:
           DEPLOY_SERVER: ${{ secrets.DEPLOY_SERVER }}
           # Токен прогона: сервер тянет им репозиторий, токен умирает вместе с job.
           GIT_TOKEN: ${{ github.token }}
+          PROJECT: ${{ inputs.project }}
         run: |
           set -euo pipefail
+          if ! [[ "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+            echo "::error::project: только a-z, 0-9, '-' и '_'"
+            exit 1
+          fi
           for var in DEPLOY_SSH_KEY DEPLOY_SERVER; do
             if [ -z "${!var}" ]; then
               echo "::error::Нет секрета $var в репозитории $GITHUB_REPOSITORY"
@@ -79,8 +84,9 @@ jobs:
           if [ "$port" = 22 ]; then known="$host"; else known="[$host]:$port"; fi
           printf '%s %s\n' "$known" "$host_key" > ~/.ssh/known_hosts
 
-          # Команду задаёт сервер (forced command), отсюда уходит только sha,
-          # токен — первой строкой stdin, чтобы не светиться в списке процессов.
+          # Команду задаёт сервер (forced command), отсюда уходят только проект и sha
+          # (сервер сверит проект со списком разрешённых ключу), токен — первой
+          # строкой stdin, чтобы не светиться в списке процессов.
           printf '%s\n' "$GIT_TOKEN" |
             ssh -i ~/.ssh/deploy_key \
               -o IdentitiesOnly=yes \
@@ -91,7 +97,7 @@ jobs:
               -o ServerAliveCountMax=8 \
               -p "$port" \
               "$user_host" \
-              "$GITHUB_SHA"
+              "$PROJECT $GITHUB_SHA"
 
       - name: Проверить ${{ inputs.url }} снаружи
         if: inputs.url != ''
