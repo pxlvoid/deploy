@@ -24,7 +24,9 @@ jobs:
     with:
       project: my-project
       url: https://example.com   # необязательно: проверка снаружи и ссылка в Environments
-    secrets: inherit
+    secrets:
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_SERVER: ${{ secrets.DEPLOY_SERVER }}
 ```
 
 Секреты репозитория:
@@ -33,6 +35,9 @@ jobs:
 |---|---|
 | `DEPLOY_SSH_KEY` | Приватный ключ деплоя проекта |
 | `DEPLOY_SERVER` | Строка 1 — `user@host` или `user@host:port`, строка 2 — ключ хоста `ssh-ed25519 AAAA...` |
+
+Секреты передаются явно: `secrets: inherit` между разными владельцами (репозиторий не у
+pxlvoid) молча не передаёт ничего.
 
 С не-default ветки workflow не выкатывает.
 
