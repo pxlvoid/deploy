@@ -56,6 +56,8 @@ jobs:
           DEPLOY_SERVER: ${{ secrets.DEPLOY_SERVER }}
           # Токен прогона: сервер тянет им репозиторий, токен умирает вместе с job.
           GIT_TOKEN: ${{ github.token }}
+          # Ссылка на этот прогон — сервер кладёт её в уведомление о результате выкатки.
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           PROJECT: ${{ inputs.project }}
         run: |
           set -euo pipefail
@@ -93,9 +95,9 @@ jobs:
           printf '%s %s\n' "$known" "$host_key" > ~/.ssh/known_hosts
 
           # Команду задаёт сервер (forced command), отсюда уходят только проект и sha
-          # (сервер сверит проект со списком разрешённых ключу), токен — первой
-          # строкой stdin, чтобы не светиться в списке процессов.
-          printf '%s\n' "$GIT_TOKEN" |
+          # (сервер сверит проект со списком разрешённых ключу). В stdin: токен (так он
+          # не светится в списке процессов) и ссылка на прогон для уведомления.
+          printf '%s\n%s\n' "$GIT_TOKEN" "$RUN_URL" |
             ssh -i ~/.ssh/deploy_key \
               -o IdentitiesOnly=yes \
               -o BatchMode=yes \
