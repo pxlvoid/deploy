@@ -1,0 +1,114 @@
+name: Deploy
+
+# Общая выкатка. Логики деплоя здесь нет: job по SSH-ключу проекта запускает на
+# сервере скрипт выкатки, а тот делает git fetch → compose build → up --wait → откат.
+# Ключ проекта на сервере привязан forced command к выкатке этого проекта — шелла
+# по нему нет. Адрес сервера и его ключ хоста — тоже в секретах, в этом репозитории
+# нет ничего о конкретном сервере.
+
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: Имя проекта на сервере
+        required: true
+        type: string
+      url:
+        description: Адрес сайта — ссылка в Environments и проверка снаружи после выкатки
+        required: false
+        type: string
+        default: ''
+    secrets:
+      DEPLOY_SSH_KEY:
+        description: Приватный ключ деплоя проекта
+        required: true
+      DEPLOY_SERVER:
+        description: 'Строка 1 — user@host или user@host:port, строка 2 — ключ хоста ("ssh-ed25519 AAAA...")'
+        required: true
+
+jobs:
+  deploy:
+    name: Выкатка ${{ inputs.project }}
+    # Прод — только с основной ветки: ручной запуск с feature-ветки не выкатит её.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Прогоны одного проекта идут по очереди; между проектами очередь держит сервер.
+    concurrency:
+      group: deploy-${{ inputs.project }}
+      cancel-in-progress: false
+    environment:
+      name: production
+      url: ${{ inputs.url }}
+
+    steps:
+      - name: Выкатить ${{ github.sha }}
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SERVER: ${{ secrets.DEPLOY_SERVER }}
+          # Токен прогона: сервер тянет им репозиторий, токен умирает вместе с job.
+          GIT_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for var in DEPLOY_SSH_KEY DEPLOY_SERVER; do
+            if [ -z "${!var}" ]; then
+              echo "::error::Нет секрета $var в репозитории $GITHUB_REPOSITORY"
+              exit 1
+            fi
+          done
+
+          target="$(printf '%s\n' "$DEPLOY_SERVER" | sed -n 1p | tr -d '[:space:]')"
+          host_key="$(printf '%s\n' "$DEPLOY_SERVER" | sed -n 2p | tr -d '\r')"
+          if ! [[ "$target" =~ ^([A-Za-z0-9._-]+)@([A-Za-z0-9.-]+)(:([0-9]+))?$ ]]; then
+            echo "::error::DEPLOY_SERVER: первая строка должна быть user@host или user@host:port"
+            exit 1
+          fi
+          user_host="${BASH_REMATCH[1]}@${BASH_REMATCH[2]}"
+          host="${BASH_REMATCH[2]}"
+          port="${BASH_REMATCH[4]:-22}"
+          if ! [[ "$host_key" =~ ^(ssh-|ecdsa-)[A-Za-z0-9-]+\ [A-Za-z0-9+/=]+$ ]]; then
+            echo "::error::DEPLOY_SERVER: вторая строка должна быть ключом хоста вида 'ssh-ed25519 AAAA...'"
+            exit 1
+          fi
+
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Ключ хоста закреплён: без него первый ssh поверил бы любому, кто
+          # ответит по этому адресу.
+          if [ "$port" = 22 ]; then known="$host"; else known="[$host]:$port"; fi
+          printf '%s %s\n' "$known" "$host_key" > ~/.ssh/known_hosts
+
+          # Команду задаёт сервер (forced command), отсюда уходит только sha,
+          # токен — первой строкой stdin, чтобы не светиться в списке процессов.
+          printf '%s\n' "$GIT_TOKEN" |
+            ssh -i ~/.ssh/deploy_key \
+              -o IdentitiesOnly=yes \
+              -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=20 \
+              -o ServerAliveInterval=15 \
+              -o ServerAliveCountMax=8 \
+              -p "$port" \
+              "$user_host" \
+              "$GITHUB_SHA"
+
+      - name: Проверить ${{ inputs.url }} снаружи
+        if: inputs.url != ''
+        env:
+          URL: ${{ inputs.url }}
+        run: |
+          set -uo pipefail
+          # 5xx и обрыв — Caddy не достучался до сервиса. 401/403/редирект на вход —
+          # норма для сайтов за авторизацией.
+          for i in $(seq 1 12); do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 "$URL" || echo 000)"
+            if [ "$code" -ge 200 ] && [ "$code" -lt 500 ]; then
+              echo "OK: $URL отвечает $code"
+              exit 0
+            fi
+            echo "[$i/12] $URL отвечает $code, жду 5с..."
+            sleep 5
+          done
+          echo "::error::$URL не отвечает после выкатки"
+          exit 1
